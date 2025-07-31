@@ -57,6 +57,7 @@ defmodule MagicAuth.MixProject do
         "guides/log_out_user_or_session.md",
         "guides/customization.md",
         "guides/multi_tenancy.md",
+        "guides/per_request_configuration.md",
         "guides/testing.md",
         "CHANGELOG.md",
         "LICENSE.md"
