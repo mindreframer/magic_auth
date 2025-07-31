@@ -10,76 +10,86 @@ Magic Auth uses the ProcessTree library to provide process-local configuration t
 
 ### Step 1: Create a Configuration Plug
 
-Create a plug that sets the configuration for specific request contexts:
+Create a plug that sets the configuration for your application:
 
 ```elixir
-defmodule MyApp.AdminMagicAuthPlug do
+defmodule MyApp.MagicAuthConfigPlug do
   def init(opts), do: opts
   
   def call(conn, _opts) do
-    config = %{
-      one_time_password_length: 8,
-      one_time_password_expiration: 15,
-      remember_me: false,
-      enable_rate_limit: true
-    }
-    
-    Process.put(:magic_auth_config, config)
+    set_magic_auth_config()
     conn
   end
-end
-
-defmodule MyApp.CustomerMagicAuthPlug do
-  def init(opts), do: opts
   
-  def call(conn, _opts) do
+  def set_magic_auth_config do
     config = %{
       one_time_password_length: 6,
       one_time_password_expiration: 5,
       remember_me: true,
-      enable_rate_limit: true
+      enable_rate_limit: true,
+      router: MyAppWeb.Router  # Important for multi-router setups
     }
     
     Process.put(:magic_auth_config, config)
-    conn
+  end
+  
+  def on_mount(:set_magic_auth_config, _params, _session, socket) do
+    set_magic_auth_config()
+    {:cont, socket}
   end
 end
 ```
 
-### Step 2: Add Plugs to Router Pipelines
+### Step 2: Configure Your Router
 
-Add your configuration plugs to the appropriate pipelines in your router:
+Add the configuration plug to your browser pipeline and configure Magic Auth with the on_mount callback:
 
 ```elixir
 defmodule MyAppWeb.Router do
   use Phoenix.Router
   use MagicAuth.Router
 
-  pipeline :admin do
-    plug :browser
-    plug MyApp.AdminMagicAuthPlug
+  pipeline :browser do
+    plug :accepts, ["html"]
+    plug :fetch_session
+    plug :fetch_live_flash
+    plug :put_root_layout, html: {MyAppWeb.Layouts, :root}
+    plug :protect_from_forgery
+    plug :put_secure_browser_headers
+    plug MyApp.MagicAuthConfigPlug  # Add your config plug here
     plug :fetch_magic_auth_session
   end
 
-  pipeline :customer do
-    plug :browser
-    plug MyApp.CustomerMagicAuthPlug
-    plug :fetch_magic_auth_session
-  end
-
-  scope "/admin", MyAppWeb.Admin do
-    pipe_through :admin
-    magic_auth("/sessions")
-  end
+  magic_auth("/auth",
+    log_in: "/login",
+    password: "/password", 
+    log_out: "/logout",
+    on_mount: [
+      {MyApp.MagicAuthConfigPlug, :set_magic_auth_config},  # Restore config for LiveView
+      {MagicAuth, :redirect_if_authenticated}               # Handle authentication
+    ]
+  )
 
   scope "/", MyAppWeb do
-    pipe_through :customer
-    magic_auth("/auth")
+    pipe_through :browser
+    
+    get "/", PageController, :home
+    live "/dashboard", DashboardLive
   end
 end
 ```
 
 ## Configuration Options
+
+The `magic_auth` macro accepts the following configuration options:
+
+- `:authenticated_pipeline` - Pipeline for authenticated routes (logout routes). Default: `[:browser, :require_authenticated]`
+- `:unauthenticated_pipeline` - Pipeline for unauthenticated routes (login, password, verify). Default: `[:browser, :redirect_if_authenticated]`
+- `:on_mount` - List of on_mount tuples for LiveView. Default: `[{MagicAuth, :redirect_if_authenticated}]`
+
+This allows you to include your configuration plugs in the authentication flow and ensure LiveView processes get the correct configuration.
+
+## Available Configuration Values
 
 You can override any of the following configuration values on a per-request basis:
 
@@ -98,48 +108,75 @@ You can override any of the following configuration values on a per-request basi
 
 ## Advanced Configuration
 
-### Host-Based Configuration
+### Multi-Host Configuration
 
-You can create more sophisticated plugs that determine configuration based on the request host:
+For applications with multiple hosts, create separate config plugs for each:
 
 ```elixir
-defmodule MyApp.HostBasedMagicAuthPlug do
+defmodule MyApp.AdminMagicAuthPlug do
   def init(opts), do: opts
   
   def call(conn, _opts) do
-    config = case conn.host do
-      "admin." <> _ -> admin_config()
-      "api." <> _ -> api_config()
-      _ -> customer_config()
-    end
-    
-    Process.put(:magic_auth_config, config)
+    set_magic_auth_config()
     conn
   end
   
-  defp admin_config do
-    %{
+  def set_magic_auth_config do
+    config = %{
       callbacks: MyApp.AdminMagicAuthCallbacks,
+      router: MyAppWeb.AdminRouter,
       one_time_password_length: 8,
       remember_me: false
     }
+    
+    Process.put(:magic_auth_config, config)
   end
   
-  defp api_config do
-    %{
-      callbacks: MyApp.APIMagicAuthCallbacks,
-      one_time_password_expiration: 2,
-      enable_rate_limit: false
-    }
+  def on_mount(:set_magic_auth_config, _params, _session, socket) do
+    set_magic_auth_config()
+    {:cont, socket}
+  end
+end
+
+defmodule MyApp.CustomerMagicAuthPlug do
+  def init(opts), do: opts
+  
+  def call(conn, _opts) do
+    set_magic_auth_config()
+    conn
   end
   
-  defp customer_config do
-    %{
+  def set_magic_auth_config do
+    config = %{
       callbacks: MyApp.CustomerMagicAuthCallbacks,
+      router: MyAppWeb.CustomerRouter,
       one_time_password_length: 6,
       remember_me: true
     }
+    
+    Process.put(:magic_auth_config, config)
   end
+  
+  def on_mount(:set_magic_auth_config, _params, _session, socket) do
+    set_magic_auth_config()
+    {:cont, socket}
+  end
+end
+```
+
+Then use different plugs in different routers:
+
+```elixir
+# AdminRouter
+pipeline :browser do
+  plug MyApp.AdminMagicAuthPlug
+  # ... other plugs
+end
+
+# CustomerRouter  
+pipeline :browser do
+  plug MyApp.CustomerMagicAuthPlug
+  # ... other plugs
 end
 ```
 
@@ -173,7 +210,29 @@ end
 
 ## LiveView Compatibility
 
-Per-request configuration works seamlessly with LiveView because LiveView processes inherit the configuration from their parent request process. No additional setup is required.
+LiveView processes run in separate processes and don't automatically inherit ProcessTree configuration. To solve this, you need to provide custom `on_mount` callbacks that restore the configuration.
+
+### How it works:
+
+1. **Configuration plugs** store config in both ProcessTree (for HTTP requests) and the session (for LiveView access)
+2. **Custom on_mount callbacks** restore the config from the session to the LiveView process
+3. **Magic Auth's on_mount callbacks** handle authentication after config is restored
+
+### The on_mount Chain:
+
+```elixir
+magic_auth("/sessions",
+  on_mount: [
+    {MyApp.ConfigPlug, :restore_config},        # First: restore config
+    {MagicAuth, :redirect_if_authenticated}     # Then: handle authentication
+  ]
+)
+```
+
+This ensures that:
+1. Configuration is restored before any Magic Auth functions are called
+2. LiveView processes have access to the same configuration as their parent HTTP request
+3. Authentication logic works correctly with the restored configuration
 
 ## Fallback Behavior
 

@@ -52,6 +52,26 @@ defmodule MagicAuth.Config do
   When a config map is stored in the process dictionary with key `:magic_auth_config`,
   it will be used instead of the Application configuration. This allows for
   per-request or per-context configuration.
+
+  For LiveView compatibility, use the same function in both a plug and an on_mount callback:
+
+  ```elixir
+  defmodule MyApp.MagicAuthConfigPlug do
+    def call(conn, _opts) do
+      set_magic_auth_config()
+      conn
+    end
+
+    def set_magic_auth_config do
+      Process.put(:magic_auth_config, %{one_time_password_length: 6})
+    end
+
+    def on_mount(:set_magic_auth_config, _params, _session, socket) do
+      set_magic_auth_config()
+      {:cont, socket}
+    end
+  end
+  ```
   """
 
   def one_time_password_length do
